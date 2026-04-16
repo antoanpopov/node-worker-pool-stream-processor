@@ -11,6 +11,7 @@ interface PendingTask<TOutput> {
 interface WorkerEntry {
   worker: Worker;
   busy: boolean;
+  currentTaskId: number | null;
 }
 
 interface WorkerPoolOptions {
@@ -40,7 +41,7 @@ export class WorkerPool<TInput, TOutput> {
 
     for (let i = 0; i < size; i++) {
       const worker = new Worker(workerPath);
-      const entry: WorkerEntry = { worker, busy: false };
+      const entry: WorkerEntry = { worker, busy: false, currentTaskId: null };
 
       worker.on('message', (msg: { id: number; result?: TOutput; error?: string }) => {
         const task = this.pending.get(msg.id);
@@ -56,12 +57,22 @@ export class WorkerPool<TInput, TOutput> {
         }
 
         entry.busy = false;
+        entry.currentTaskId = null;
         this.drainQueue();
       });
 
       worker.on('error', (err: Error) => {
-        // Worker crashed — reject all pending for this worker and replace it
+        // Worker crashed — reject the in-flight task so dispatch() doesn't hang
+        if (entry.currentTaskId !== null) {
+          const task = this.pending.get(entry.currentTaskId);
+          if (task) {
+            this.pending.delete(entry.currentTaskId);
+            this.failedCount++;
+            task.reject(err);
+          }
+        }
         entry.busy = false;
+        entry.currentTaskId = null;
         console.error(`Worker ${i} crashed:`, err.message);
       });
 
@@ -81,6 +92,7 @@ export class WorkerPool<TInput, TOutput> {
       const idle = this.workers.find((w) => !w.busy);
       if (idle) {
         idle.busy = true;
+        idle.currentTaskId = id;
         this.pending.set(id, { resolve, reject });
         idle.worker.postMessage({ id, data: input });
         return;
@@ -105,6 +117,7 @@ export class WorkerPool<TInput, TOutput> {
       const task = this.queue.shift();
       if (!task) break;
       idle.busy = true;
+      idle.currentTaskId = task.id;
       this.pending.set(task.id, { resolve: task.resolve, reject: task.reject });
       idle.worker.postMessage({ id: task.id, data: task.input });
     }
